@@ -14,7 +14,7 @@ class file
             $message = serialize($message);
         }
 
-        error_log('['.date('y-m-d h:m:s').'][info]'.$message.PHP_EOL,3,$path);
+        error_log('['.date('Y-m-d h:m:s').'][info]'.$message.PHP_EOL,3,$path);
     }
 
 }

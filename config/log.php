@@ -2,7 +2,7 @@
 
 
 return [
-
+    //默认渠道
     'default' => 'single',
 
     'channel' => [

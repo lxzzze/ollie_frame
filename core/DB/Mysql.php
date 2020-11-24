@@ -68,7 +68,10 @@ class Mysql
                 $this->where[] = [$column,'=',$value];
             }
         }
+        return $this;
     }
+
+
 
 //    public function select(...$query)
 //    {
