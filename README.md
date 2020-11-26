@@ -5,6 +5,24 @@
 通过一步步搭建框架的每个部分,了解框架内部基本的实现原理,尝试编写相关代码去实现功能,或者引用别人写好的第三方包,
 查看其源代码了解其实现原理，下面开始一步步介绍框架的各个组成。
 
+- [单一入口](#单一入口)
+- [服务容器](#服务容器)
+- [服务提供者](#服务提供者)
+- [定义全局函数](#定义全局函数)
+- [添加信息调试工具](#添加信息调试工具)
+- [添加配置](#添加配置)
+- [引入.env配置](#引入.env配置)
+- [请求](#请求)
+- [路由系统](#路由系统)
+- [响应](#响应)
+- [视图](#视图)
+- [数据库](#数据库)
+    - [查询构造器](#查询构造器)
+    - [模型](#模型)
+- [日志](#日志)
+- [异常处理](#异常处理)
+
+
 ## 单一入口
 跟正常的现代化框架一样,所有请求通过单一入口进入,文件位于./index.php文件中
 
@@ -650,6 +668,509 @@ if (!function_exists('view')){
 }
 ```
 
+## 数据库
+
+通过引入`composer require topthink/think-orm`第三方包操作数据库和模型,详细第三方包信息可查看[ThinkORM开发指南](https://www.kancloud.cn/manual/think-orm/1257998)
+
+添加配置文件./config/database.php,里面包含数据库的基本配置
+
+再添加DBServiceProvider数据库服务提供者,这里的register()只需要初始化Db类配置信息
+
+```
+public function register()
+{
+    //数据库配置信息设置（全局有效）
+    Db::setConfig(config('database'));
+}
+```
+
+### 查询构造器
+
+这里直接引用了第三方包,所以研究研究解读一下源码
+
+我这里根据下面这行代码解读内部的使用
+
+`Db::table('test')->where('id','=',11)->select()`
+
+在查看源码./vendor/topthink/think-orm/src/facade/Db.php文件中,通过Db::table()这种静态方法调用类会触发
+__callStatic()魔术方法,方法会调用think\DbManager类下的方法并将参数传入
+
+```
+protected static function createFacade(bool $newInstance = false)
+{
+    $class = static::getFacadeClass() ?: 'think\DbManager';
+
+    if (static::$alwaysNewInstance) {
+        $newInstance = true;
+    }
+
+    if ($newInstance) {
+        return new $class();
+    }
+
+    if (!self::$instance) {
+        self::$instance = new $class();
+    }
+
+    return self::$instance;
+
+}
+
+// 调用实际类的方法
+public static function __callStatic($method, $params)
+{
+    return call_user_func_array([static::createFacade(), $method], $params);
+}
+```
+
+再查看./vendor/topthink/think-orm/src/DbManager.php文件,触发了魔术方法__call调用了$this->connect()方法,其中connect()方法
+返回了数据库连接类的实例
+
+```
+ /**
+ * 创建/切换数据库连接查询
+ * @access public
+ * @param string|null $name  连接配置标识
+ * @param bool        $force 强制重新连接
+ * @return ConnectionInterface
+ */
+public function connect(string $name = null, bool $force = false)
+{
+    return $this->instance($name, $force);
+}
+
+
+public function __call($method, $args)
+{
+    return call_user_func_array([$this->connect(), $method], $args);
+}
+
+```
+
+再来看看createConnection方法,这个方法相当于是一个工厂函数,通过配置中传入的type,实例化返回对应的连接类,连接类位于
+./vendor/topthink/think-orm/src/db/connector目录下,目前支持mongodb,mysql,oracle,sqlite等多种数据库类型,所以上面的
+魔术方法__call实际上是调用了./vendor/topthink/think-orm/src/db/connector/Mysql.php中的方法
+
+```
+/**
+ * 创建连接
+ * @param $name
+ * @return ConnectionInterface
+ */
+protected function createConnection(string $name): ConnectionInterface
+{
+    $config = $this->getConnectionConfig($name);
+
+    $type = !empty($config['type']) ? $config['type'] : 'mysql';
+
+    if (false !== strpos($type, '\\')) {
+        $class = $type;
+    } else {
+        $class = '\\think\\db\\connector\\' . ucfirst($type);
+    }
+
+    /** @var ConnectionInterface $connection */
+    $connection = new $class($config);
+    $connection->setDb($this);
+
+    if ($this->cache) {
+        $connection->setCache($this->cache);
+    }
+    return $connection;
+}
+```
+
+查看./vendor/topthink/think-orm/src/db/connector/Mysql.php代码发现其继承了./vendor/topthink/think-orm/src/db/PDOConnection.php,
+然后PDOConnection又继承了./vendor/topthink/think-orm/src/db/Connection.php数据库连接基础类,最终调用了Connection类中的方法,
+实际上调用业务逻辑实现是在./vendor/topthink/think-orm/src/db/BaseQuery.php这个数据查询基础类
+
+```
+/**
+ * 指定表名开始查询
+ * @param $table
+ * @return BaseQuery
+ */
+public function table($table)
+{
+    return $this->newQuery()->table($table);
+}
+```
+
+实际上查看构造器的流程都差不多像这样,通过调用__call和__callStatic()两个魔术方法,去调用其他实例
+
+### 模型
+
+在创建./app/Model目录,该目录存放我们定义的模型类,我这里创建一个测试模型类Test.php
+
+```
+namespace App\Model;
+
+
+use think\Model;
+
+class Test extends Model
+{
+    protected $table = 'test';
+}
+```
+
+我们就可以通过`Test::where('id','=',11)->select()`操作数据库,等价于上面的`Db::table('test')->where('id','=',11)->select()`
+
+下面继续分析一下源码,看看内部执行了怎样的操作
+
+我们定义的模型都需要继承./vendor/topthink/think-orm/src/Model.php这个模型类,类中也同样定义了__call和__callStatic两个魔术方法,使模型可以同
+查询构造器一样,使用相同的函数方法去查询。
+
+```
+public function __call($method, $args)
+{
+    if (isset(static::$macro[static::class][$method])) {
+        return call_user_func_array(static::$macro[static::class][$method]->bindTo($this, static::class), $args);
+    }
+
+    if ('withattr' == strtolower($method)) {
+        return call_user_func_array([$this, 'withAttribute'], $args);
+    }
+
+    return call_user_func_array([$this->db(), $method], $args);
+}
+
+public static function __callStatic($method, $args)
+{
+    if (isset(static::$macro[static::class][$method])) {
+        return call_user_func_array(static::$macro[static::class][$method]->bindTo(null, static::class), $args);
+    }
+
+    $model = new static();
+
+    return call_user_func_array([$model->db(), $method], $args);
+}
+```
+
+其中db()函数为模型的重点
+
+```
+/**
+ * 获取当前模型的数据库查询对象
+ * @access public
+ * @param array $scope 设置不使用的全局查询范围
+ * @return Query
+ */
+public function db($scope = []): Query
+{
+    //实例化./vendor/topthink/think-orm/src/DBManager.php类,在上面讲解查询构造器中,我们知道DBManager类为查询构造器的核心
+    $query = self::$db->connect($this->connection)
+        ->name($this->name . $this->suffix)
+        ->pk($this->pk);
+
+    //设置查询的表名,表名为我们在模型当中定义的$table变量
+    if (!empty($this->table)) {
+        $query->table($this->table . $this->suffix);
+    }
+
+    $query->model($this)
+        ->json($this->json, $this->jsonAssoc)
+        ->setFieldType(array_merge($this->schema, $this->jsonType));
+
+    // 软删除
+    if (property_exists($this, 'withTrashed') && !$this->withTrashed) {
+        $this->withNoTrashed($query);
+    }
+
+    // 全局作用域
+    if (is_array($scope)) {
+        $globalScope = array_diff($this->globalScope, $scope);
+        $query->scope($globalScope);
+    }
+    // 返回当前模型的数据库查询对象
+    return $query;
+}
+```
+
+我这里为模型添加一个全局作用域,分析一下模型的作用域是如何实现的,代码如下
+
+```
+use think\Model;
+
+class Activity extends Model
+{
+    protected $table = 'activity';
+
+    // 定义全局的查询范围
+    protected $globalScope = ['status'];
+
+    public function scopeStatus($query)
+    {
+        $query->where('status',1);
+    }
+}
+```
+
+在./vendor/topthink/think-orm/src/Model.php类中的db()方法,判断了是否有添加全局作用域,如果添加则调用scope()函数,这里的全局作用域和局部作用域的
+实现都是经过这个scope函数
+
+```
+/**
+ * 获取当前模型的数据库查询对象
+ * @access public
+ * @param array $scope 设置不使用的全局查询范围
+ * @return Query
+ */
+public function db($scope = []): Query
+{
+    /** @var Query $query */
+    $query = self::$db->connect($this->connection)
+        ->name($this->name . $this->suffix)
+        ->pk($this->pk);
+
+    if (!empty($this->table)) {
+        $query->table($this->table . $this->suffix);
+    }
+    $query->model($this)
+        ->json($this->json, $this->jsonAssoc)
+        ->setFieldType(array_merge($this->schema, $this->jsonType));
+
+    // 软删除
+    if (property_exists($this, 'withTrashed') && !$this->withTrashed) {
+        $this->withNoTrashed($query);
+    }
+    // 全局作用域
+    if (is_array($scope)) {
+        $globalScope = array_diff($this->globalScope, $scope);
+        $query->scope($globalScope);
+    }
+    // 返回当前模型的数据库查询对象
+    return $query;
+}
+```
+
+查看./vendor/topthink/think-orm/src/db/concern/ModelRelationQuery类的scope函数,这里就是模型作用域的主要实现函数,
+我们在定义作用域中返回的$query是./vendor/topthink/think-orm/src/db/Query类的实例,该实例为PDO数据查询类
+
+```
+/**
+ * 添加查询范围
+ * @access public
+ * @param array|string|Closure $scope 查询范围定义
+ * @param array                $args  参数
+ * @return $this
+ */
+public function scope($scope, ...$args)
+{
+    // 查询范围的第一个参数始终是当前查询对象
+    array_unshift($args, $this);
+    
+    if ($scope instanceof Closure) {
+        call_user_func_array($scope, $args);
+        return $this;
+    }
+
+    if (is_string($scope)) {
+        $scope = explode(',', $scope);
+    }
+    if ($this->model) {
+        // 检查模型类的查询范围方法
+        foreach ($scope as $name) {
+            //这里强制了作用域方法必须以scope开头,
+            $method = 'scope' . trim($name);
+            if (method_exists($this->model, $method)) {
+                call_user_func_array([$this->model, $method], $args);
+            }
+        }
+    }
+
+    return $this;
+}
+```
+
+再来看看模型关联,这里添加了一个商品模型./app/Model/Goods.php
+
+数据库结构为下面这种形式
+```
+activity
+    id - integer
+    name - string
+
+activity_goods
+    id - integer
+    activity_id - integer
+    goods_id - integer
+
+goods
+    id - integer
+    name - string 
+```
+
+在activity活动类型中定义关联关系,这里定义多对多的关联方式
+```
+public function goods()
+{
+    return $this->belongsToMany(Goods::class,'activity_goods','goods_id','activity_id');
+}
+```
+
+在获得关联可使用`Activity::where('id','=',60)->find()->goods()->select()`或`Activity::with(['goods'])->where('id','=',60)->find()`
+两种方式获取数据,现在通过源码分析一下,这里使用的belongsToMany实际上调用了./vendor/topthink/think-orm/src/model/concern/RelationShip.php中的
+belongsToMany方法
+
+```
+/**
+ * BELONGS TO MANY 关联定义
+ * @access public
+ * @param  string $model      模型名
+ * @param  string $middle     中间表/模型名
+ * @param  string $foreignKey 关联外键
+ * @param  string $localKey   当前模型关联键
+ * @return BelongsToMany
+ */
+public function belongsToMany(string $model, string $middle = '', string $foreignKey = '', string $localKey = ''): BelongsToMany
+{
+    // 记录当前关联信息
+    $model      = $this->parseModel($model);
+    $name       = Str::snake(class_basename($model));
+    $middle     = $middle ?: Str::snake($this->name) . '_' . $name;
+    $foreignKey = $foreignKey ?: $name . '_id';
+    $localKey   = $localKey ?: $this->getForeignKey($this->name);
+    return new BelongsToMany($this, $model, $middle, $foreignKey, $localKey);
+}
+```
+
+查看./vendor/topthink/think-orm/src/model/relation/BelongsToMany的构造方法,这里可以看到`$this->query = (new $model)->db()`
+已经可以知道已经实例化了数据库查询对象,剩余的过程就跟其他正常的模型一致,当然其他关联模型的原理也是类似
+
+```
+public function __construct(Model $parent, string $model, string $middle, string $foreignKey, string $localKey)
+{
+    $this->parent     = $parent;
+    $this->model      = $model;
+    $this->foreignKey = $foreignKey;
+    $this->localKey   = $localKey;
+
+    if (false !== strpos($middle, '\\')) {
+        $this->pivotName = $middle;
+        $this->middle    = class_basename($middle);
+    } else {
+        $this->middle = $middle;
+    }
+
+    $this->query = (new $model)->db();
+    $this->pivot = $this->newPivot();
+}
+```
+
+再来看看预加载的方式,这里实际上调用了./vendor/topthink/think-orm/src/db/concern/ModelRelationQuery中的with方法,实际上这里的
+with()只是将类中的$this->options设置为我们需求的预加载数组,实际调用还不在这里
+
+```
+/**
+ * 关联预载入 In方式
+ * @access public
+ * @param array|string $with 关联方法名称
+ * @return $this
+ */
+public function with($with)
+{
+    if (!empty($with)) {
+        $this->options['with'] = (array) $with;
+    }
+
+    return $this;
+}
+```
+
+在获取数据的find()和select()方法中,会进行判断,是否返回模型$this->resultToModel()这个方法中,其中会判断是否添加了预加载
+```
+public function find($data = null)
+{
+    if (!is_null($data)) {
+        // AR模式分析主键条件
+        $this->parsePkWhere($data);
+    }
+
+    if (empty($this->options['where']) && empty($this->options['order'])) {
+        $result = [];
+    } else {
+        $result = $this->connection->find($this);
+    }
+
+    // 数据处理
+    if (empty($result)) {
+        return $this->resultToEmpty();
+    }
+
+    if (!empty($this->model)) {
+        // 返回模型对象
+        $this->resultToModel($result, $this->options);
+    } else {
+        $this->result($result);
+    }
+
+    return $result;
+}
+
+protected function resultToModel(array &$result, array $options = [], bool $resultSet = false, array $withRelationAttr = []): void
+{
+    ...
+    // 预载入查询
+    if (!$resultSet && !empty($options['with'])) {
+        $result->eagerlyResult($result, $options['with'], $withRelationAttr, false, $options['with_cache'] ?? false);
+    }
+    ...
+}
+```
+
+这里就是预加载的核心方法了,`$relationResult = $this->$relation();`代码执行了我们定义的关联方法,返回了BelongsToMany类实例,再调用其中
+的eagerlyResult()方法设置了$this->relation变量
+
+```
+/**
+ * 预载入关联查询 返回模型对象
+ * @access public
+ * @param  Model $result    数据对象
+ * @param  array $relations 关联
+ * @param  array $withRelationAttr 关联获取器
+ * @param  bool  $join      是否为JOIN方式
+ * @param  mixed $cache     关联缓存
+ * @return void
+ */
+public function eagerlyResult(Model $result, array $relations, array $withRelationAttr = [], bool $join = false, $cache = false): void
+{
+    foreach ($relations as $key => $relation) {
+        $subRelation = [];
+        $closure     = null;
+
+        if ($relation instanceof Closure) {
+            $closure  = $relation;
+            $relation = $key;
+        }
+
+        if (is_array($relation)) {
+            $subRelation = $relation;
+            $relation    = $key;
+        } elseif (strpos($relation, '.')) {
+            [$relation, $subRelation] = explode('.', $relation, 2);
+
+            $subRelation = [$subRelation];
+        }
+
+        $relationName = $relation;
+        $relation     = Str::camel($relation);
+        $relationResult = $this->$relation();
+        if (isset($withRelationAttr[$relationName])) {
+            $relationResult->withAttr($withRelationAttr[$relationName]);
+        }
+
+        if (is_scalar($cache)) {
+            $relationCache = [$cache];
+        } else {
+            $relationCache = $cache[$relationName] ?? [];
+        }
+
+        $relationResult->eagerlyResult($result, $relationName, $subRelation, $closure, $relationCache, $join);
+    }
+}
+```
+
 ## 日志
 
 这里写了一个比较简单的日志实现类
@@ -732,6 +1253,117 @@ class Log
         if ($this->driver == 'file'){
             $this->instance->info($message,$this->path);
         }
+    }
+}
+```
+
+## 异常处理
+
+经过上面的流程处理,可以把./index.php中的代码简化成如下几行代码,这样看得也比较爽,现在引入异常处理中心
+
+```
+define('FRAME_BASE_PATH', __DIR__); // 框架目录
+//引入自动加载
+require __DIR__.'/vendor/autoload.php';
+//引入容器类文件
+require_once __DIR__.'/core/Container.php';
+//实例化容器(包括初始化服务)
+$container = app();
+//返回响应
+$response = app('router')->dispatch(app('request'));
+//将响应返回客户端
+(new Laminas\HttpHandlerRunner\Emitter\SapiEmitter)->emit($response);
+```
+
+首先创建./app/Exceptions异常处理目录,并创建ExceptionHub.php和ExceptionInterface.php两个文件,两个文件功能为异常处理中心类和异常处理接口类,
+文件内容如下所示
+
+```
+class ExceptionHub implements ExceptionInterface
+{
+    //处理异常类
+    protected $handleException;
+
+    //错误异常中心处理
+    public function handle($exception)
+    {
+        $this->createExceptions(get_class($exception));
+        if (!$this->handleException){
+            //未知异常
+            $this->notFoundExceptions();
+            exit();
+        }
+        //异常处理
+        $this->handleException->handle($exception);
+    }
+
+    //工厂函数,创建处理异常类
+    public function createExceptions($className)
+    {
+        $explode = explode('\\',$className);
+        $exceptionName = last($explode);
+        $handleExceptionName = 'App\Exceptions\\'.$exceptionName;
+        if (class_exists($handleExceptionName)){
+            $this->handleException = new $handleExceptionName();
+        }
+    }
+
+    public function notFoundExceptions()
+    {
+        echo '未知异常';
+    }
+}
+
+interface ExceptionInterface
+{
+    //错误处理
+    public function handle($exception);
+}
+```
+
+创建ExceptionServiceProvider异常处理服务提供者,绑定添加exception服务
+
+可以把./index.php文件优化成如下代码,对异常进行捕获,传递给ExceptionHub类进行处理
+```
+define('FRAME_BASE_PATH', __DIR__); // 框架目录
+
+require __DIR__.'/vendor/autoload.php';
+
+require_once __DIR__.'/core/Container.php';
+//实例化容器(包括初始化服务)
+$container = app();
+try {
+    //返回响应
+    $response = app('router')->dispatch(app('request'));
+    //将响应返回客户端
+    (new Laminas\HttpHandlerRunner\Emitter\SapiEmitter)->emit($response);
+}catch (\Exception $exception){
+    app('exception')->handle($exception);
+}
+```
+
+这里以路由系统中的路由未匹配成功和请求方法不允许错误为例子
+
+创建./app/Exceptions/MethodNotAllowedException.php文件和./app/Exceptions/NotFoundException.php文件,我们将两个异常进行专门的处理,
+若路由未匹配成功,则会输出`路由未匹配成功`;若请求方法不允许,则会输出`请求方法未被允许`。当然这里只是举例说明异常处理的情况,我们在编码过程中,可以
+主动抛出错误,并在专门创建的异常类中处理异常
+
+```
+class MethodNotAllowedException implements ExceptionInterface
+{
+
+    public function handle($exception)
+    {
+        echo '请求方法未被允许';
+    }
+}
+
+class NotFoundException implements ExceptionInterface
+{
+
+    public function handle($exception)
+    {
+        echo '路由未匹配成功';
     }
 }
 ```

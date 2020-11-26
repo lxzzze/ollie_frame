@@ -14,7 +14,8 @@ return [
         \core\providers\ResponseServiceProvider::class,
         \core\providers\RequestServiceProvider::class,
         \core\providers\LogServiceProvider::class,
-        \core\providers\DBServiceProvider::class
+        \core\providers\DBServiceProvider::class,
+        \core\providers\ExceptionServiceProvider::class
     ]
 
 ];
