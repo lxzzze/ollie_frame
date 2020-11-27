@@ -1,7 +1,8 @@
 <?php
 namespace core\providers;
 
-use core\Container;
+use App\middleware\position1Middleware;
+use App\middleware\TestMiddleware;
 use League\Route\Router;
 
 class RoutingServiceProvider implements ServiceProviderInterface
@@ -32,6 +33,10 @@ class RoutingServiceProvider implements ServiceProviderInterface
         foreach ($this->mapRoutes as $route){
             call_user_func($this->$route(),$router);
         }
+        app('router')->middleware(new position1Middleware());
+
+        app('router')->middleware(new TestMiddleware());
+
     }
 
 

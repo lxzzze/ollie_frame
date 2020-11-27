@@ -14,6 +14,7 @@
 - [引入.env配置](#引入.env配置)
 - [请求](#请求)
 - [路由系统](#路由系统)
+- [中间件](#中间件)
 - [响应](#响应)
 - [视图](#视图)
 - [数据库](#数据库)
@@ -438,7 +439,7 @@ Laminas\Diactoros\ServerRequest {#38
 
 ## 路由系统
 
-实际上路由系统,请求,响应等功能都是使用这里推荐的[route.thephpleague](https://route.thephpleague.com/4.x/usage/)
+实际上路由系统,请求,响应,中间件等功能都是使用这里推荐的[route.thephpleague](https://route.thephpleague.com/4.x/usage/)
 
 通过引用`composer require league/route`第三方包路由系统,由于该第三方包对响应进行了限制,只允许返回ResponseInterface接口
 所以需要再引入其开发的响应包`composer require laminas/laminas-httphandlerrunner`,相关案例可查看[route.thephpleague](https://route.thephpleague.com/4.x/usage/)
@@ -584,6 +585,166 @@ public function mapWebRoutes()
         require_once 'routes/web.php';
     };
 }
+```
+
+## 中间件
+
+在使用路由系统的第三方包支持了中间件的使用,具体案例可以参考第三方包给的文档[middleware](https://route.thephpleague.com/4.x/middleware/)
+
+创建./app/middleware目录,在这个目录去添加相关的中间件,这里添加一个测试中间件TestMiddleware
+
+```
+class TestMiddleware implements MiddlewareInterface
+{
+
+    /**
+     * @inheritDoc
+     */
+    public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
+    {
+        $response = $handler->handle($request);
+        echo 'test'."\n";
+        // do something with the response
+        return $response;
+    }
+}
+
+//根据第三方包文档,将中间件引入可以全局引入,按组引入和针对单个路由引入,我这里测试在./core/providers/RoutingServiceProvider中添加全局引入
+app('router')->middleware(new TestMiddleware());
+
+```
+
+这里尝试分析一下源码的中间件是如何实现的
+
+当我们为路由添加中间件的时候,会调用./vendor/league/route下面两个方法,这里就相当于为$this->middleware变量赋值
+```
+/**
+ * {@inheritdoc}
+ */
+public function middleware(MiddlewareInterface $middleware): MiddlewareAwareInterface
+{
+    $this->middleware[] = $middleware;
+
+    return $this;
+}
+
+/**
+ * {@inheritdoc}
+ */
+public function middlewares(array $middlewares): MiddlewareAwareInterface
+{
+    foreach ($middlewares as $middleware) {
+        $this->middleware($middleware);
+    }
+
+    return $this;
+}
+```
+
+这里通过dd打印app('route')变量,如下所示,我们定义的路由为routes变量,这里定义了两个路由,其中定义的全局作用的中间件为middleware,
+针对单个路由的会存放在routes中的middleware变量中,打印后,可以清楚的看见我们为路由定义的变量都存放在哪里
+
+```
+^ League\Route\Router {#38 ▼
+  #routes: array:2 [▼
+    0 => League\Route\Route {#40 ▼
+      #handler: "App\Controller\TestController::index"
+      #group: null
+      #method: "GET"
+      #path: "/"
+      #vars: []
+      #middleware: array:1 [▶]
+      #host: null
+      #name: null
+      #scheme: null
+      #port: null
+      #strategy: League\Route\Strategy\ApplicationStrategy {#34 ▶}
+    }
+    1 => League\Route\Route {#35 ▼
+      #handler: "App\Controller\TestController::about"
+      #group: null
+      #method: "GET"
+      #path: "/about"
+      #vars: []
+      #middleware: []
+      #host: null
+      #name: null
+      #scheme: null
+      #port: null
+      #strategy: League\Route\Strategy\ApplicationStrategy {#34 ▶}
+    }
+  ]
+  #namedRoutes: []
+  #groups: []
+  #patternMatchers: array:5 [▶]
+  #routeParser: FastRoute\RouteParser\Std {#42}
+  #dataGenerator: FastRoute\DataGenerator\GroupCountBased {#29 ▶}
+  #currentGroupPrefix: ""
+  #middleware: array:2 [▶]
+  #strategy: League\Route\Strategy\ApplicationStrategy {#34 ▶}
+}
+```
+
+再来看看路由分发方法dispatch(),这里的`$dispatcher->lazyMiddleware($middleware);`和`$dispatcher->middleware($middleware);`
+为$dispatcher变量赋值全局中间件,剩余的dispatchRequest()会匹配设置针对单个路由或组的中间件
+
+```
+public function dispatch(ServerRequestInterface $request): ResponseInterface
+{
+    if ($this->getStrategy() === null) {
+        $this->setStrategy(new ApplicationStrategy);
+    }
+
+    $this->prepRoutes($request);
+
+    /** @var Dispatcher $dispatcher */
+    $dispatcher = (new Dispatcher($this->getData()))->setStrategy($this->getStrategy());
+    //获取全局中间件,将全局中间价的变量赋值给$dispatcher中
+    foreach ($this->getMiddlewareStack() as $middleware) {
+        if (is_string($middleware)) {
+            $dispatcher->lazyMiddleware($middleware);
+            continue;
+        }
+
+        $dispatcher->middleware($middleware);
+    }
+    return $dispatcher->dispatchRequest($request);
+}
+```
+
+这里是执行的核心,包含执行中间件和控制器的流程
+```
+/**
+ * {@inheritdoc}
+ */
+public function handle(ServerRequestInterface $request): ResponseInterface
+{
+    $middleware = $this->shiftMiddleware();
+    return $middleware->process($request, $this);
+}
+```
+
+这其中$this->middleware变量为核心,我们可以打印一下这个变量,我们在中间件中必须定义`$response = $handler->handle($request);`实际上就是去
+执行上面的handle方法,当前变量$this会一直传递存在于作用域上,然后就是配合array_shift()函数一步步执行中间件中我们定义的process()函数
+
+```
+^ array:5 [▼
+  0 => Psr\Http\Server\MiddlewareInterface@anonymous {#22}
+  1 => App\middleware\TestMiddleware {#33}
+  2 => League\Route\Route {#40 ▼
+    #handler: "App\Controller\TestController::index"
+    #group: null
+    #method: "GET"
+    #path: "/"
+    #vars: []
+    #middleware: array:1 [▶]
+    #host: null
+    #name: null
+    #scheme: null
+    #port: null
+    #strategy: League\Route\Strategy\ApplicationStrategy {#34 ▶}
+  }
+]
 ```
 
 ## 响应

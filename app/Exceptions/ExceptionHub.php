@@ -12,6 +12,7 @@ class ExceptionHub implements ExceptionInterface
     //错误异常中心处理
     public function handle($exception)
     {
+        dd($exception);
         $this->createExceptions(get_class($exception));
         if (!$this->handleException){
             //未知异常

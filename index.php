@@ -11,7 +11,7 @@ try {
     //返回响应
     $response = app('router')->dispatch(app('request'));
     //将响应返回客户端
-    (new Laminas\HttpHandlerRunner\Emitter\SapiEmitter)->emit($response);
+    (new \core\Response())->emit($response);
 }catch (\Exception $exception){
     app('exception')->handle($exception);
 }
